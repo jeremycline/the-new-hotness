@@ -10,12 +10,12 @@ def get_version(package_name, yumconfig):
     return nvr_dict[package_name]
 
 
-@cache.cache_on_arguments()
+#@cache.cache_on_arguments()
 def build_nvr_dict(yumconfig):
     cmdline = ["/usr/bin/repoquery",
                "--config", yumconfig,
                "--quiet",
-               "--archlist=src",
+               #"--archlist=src",
                "--all",
                "--qf",
                "%{name}\t%{version}\t%{release}"]
