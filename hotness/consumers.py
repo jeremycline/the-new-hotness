@@ -43,9 +43,8 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
         # This is the real production topic
         'org.release-monitoring.prod.anitya.project.version.update',
 
-        # For development, I use this so I can test with this command:
-        # $ fedmsg-dg-replay --msg-id 2014-77ff95ff-3373-4926-bf23-bf0754b0925c
-        #'org.fedoraproject.dev.anitya.project.version.update',
+        # Also listen for when projects are newly mapped to Fedora
+        'org.release-monitoring.prod.anitya.project.map.new',
 
         # Anyways, we also listen for koji scratch builds to circle back:
         'org.fedoraproject.prod.buildsys.task.state.change',
@@ -54,11 +53,16 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
         # and comment about those (when they succeed).
         'org.fedoraproject.prod.buildsys.build.state.change',
 
-        # Lastly, we look for new packages being added to Fedora for the very
+        # We look for new packages being added to Fedora for the very
         # first time so that we can double-check that they have an entry in
         # release-monitoring.org.  If they don't, then we try to add them when
         # we can.
         'org.fedoraproject.prod.pkgdb.package.new',
+
+        # Lastly, look for packages that get their monitoring flag switched on
+        # and off.  We'll use that as another opportunity to map stuff in
+        # anitya.
+        'org.fedoraproject.prod.pkgdb.package.monitor.update',
     ]
 
     config_key = 'hotness.bugzilla.enabled'
@@ -120,35 +124,68 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
         self.log.debug("Received %r" % msg.get('msg_id', None))
 
         if topic.endswith('anitya.project.version.update'):
-            self.handle_anitya(msg)
+            self.handle_anitya_version_update(msg)
+        elif topic.endswith('anitya.project.map.new'):
+            self.handle_anitya_map_new(msg)
         elif topic.endswith('buildsys.task.state.change'):
             self.handle_buildsys_scratch(msg)
         elif topic.endswith('buildsys.build.state.change'):
             self.handle_buildsys_real(msg)
         elif topic.endswith('pkgdb.package.new'):
             self.handle_new_package(msg)
+        elif topic.endswith('pkgdb.package.monitor.update'):
+            self.handle_monitor_toggle(msg)
         else:
             self.log.debug("Dropping %r %r" % (topic, msg['msg_id']))
             pass
 
-    def handle_anitya(self, msg):
+    def handle_anitya_version_update(self, msg):
         self.log.info("Handling anitya msg %r" % msg.get('msg_id', None))
         # First, What is this thing called in our distro?
         # (we do this little inner.get(..) trick to handle legacy messages)
         inner = msg['msg'].get('message', msg['msg'])
-        mappings = dict([
-            (p['distro'], p['package_name']) for p in inner['packages']
-        ])
-        if self.distro not in mappings:
+        if not self.distro in [p['distro'] for p in inner['packages']]:
             self.log.info("No %r mapping for %r.  Dropping." % (
                 self.distro, msg['msg']['project']['name']))
             self.publish("update.drop", msg=dict(trigger=msg, reason="anitya"))
             return
 
-        package = mappings['Fedora']
+        # Sometimes, an upstream is mapped to multiple fedora packages
+        # File a bug on each one...
+        # https://github.com/fedora-infra/the-new-hotness/issues/33
+        for package in inner['packages']:
+            if package['distro'] == self.distro:
+                inner = msg['msg'].get('message', msg['msg'])
+                pname = package['package_name']
+
+                upstream = inner['upstream_version']
+                self._handle_anitya_update(upstream, pname, msg)
+
+    def handle_anitya_map_new(self, msg):
+        message = msg['msg']['message']
+        if message['distro'] != self.distro:
+            self.log.info("New mapping on %s, not for %s.  Dropping." % (
+                message['distro'], self.distro))
+            return
+
+        project = message['project']
+        package = message['new']
+        upstream = msg['msg']['project']['version']
+
+        self.log.info("Newly mapped %r to %r bears version %r" % (
+            project, package, upstream))
+
+        if upstream:
+            self._handle_anitya_update(upstream, package, msg)
+        else:
+            self.log.info("Forcing an anitya upstream check.")
+            anitya = hotness.anitya.Anitya(self.anitya_url)
+            anitya.force_check(msg['msg']['project'])
+
+    def _handle_anitya_update(self, upstream, package, msg):
         url = msg['msg']['project']['homepage']
 
-        # Is it something that we're being asked not to act on:
+        # Is it something that we're being asked not to act on?
         if not self.is_monitored(package):
             self.log.info("Pkgdb says not to monitor %r.  Dropping." % package)
             self.publish("update.drop", msg=dict(trigger=msg, reason="pkgdb"))
@@ -157,7 +194,6 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
         # Is it new to us?
         fname = self.yumconfig
         version, release = hotness.repository.get_version(package, fname)
-        upstream = inner['upstream_version']
         self.log.info("Comparing upstream %s against repo %s-%s" % (
             upstream, version, release))
         diff = hotness.helpers.cmp_upstream_repo(upstream, (version, release))
@@ -180,12 +216,20 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
             self.log.info("Now with #%i, time to do koji stuff" % bz.bug_id)
             try:
                 # Kick off a scratch build..
-                task_id = self.buildsys.handle(package, upstream, version, bz)
+                task_id, patch_filename, description = self.buildsys.handle(
+                    package, upstream, version, bz)
+
                 # Map that koji task_id to the bz ticket we want to pursue.
                 self.triggered_task_ids[task_id] = bz
-            except Exception:
-                self.log.warning("Failed to kick off scratch build.")
+
+                # Attach the patch to the ticket
+                self.bugzilla.attach_patch(patch_filename, description, bz)
+            except Exception as e:
+                heading = "Failed to kick off scratch build."
+                note = heading + "\n\n" + str(e)
+                self.log.warning(heading)
                 self.log.warning(traceback.format_exc())
+                self.bugzilla.follow_up(note, bz)
 
     def handle_buildsys_scratch(self, msg):
         # Is this a scratch build that we triggered a couple minutes ago?
@@ -285,23 +329,92 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
             self.log.warning("Fail. %i matching projects on anitya." % total)
             self.publish("project.map", msg=dict(
                 trigger=msg, total=total, success=False))
-            return
         elif total == 1:
             self.log.info("Found one match on Anitya.")
             project = projects[0]
             anitya.login(self.anitya_username, self.anitya_password)
-            success = anitya.map_new_package(name, project)
+
+            reason = None
+            try:
+                anitya.map_new_package(name, project)
+            except hotness.anitya.AnityaException as e:
+                reason = str(e)
+
             self.publish("project.map", msg=dict(
-                trigger=msg, project=project, success=success))
+                trigger=msg,
+                project=project,
+                success=not bool(reason),
+                reason=reason))
+        else:
+            self.log.info("Saw 0 matching projects on anitya.  Adding.")
+            anitya.login(self.anitya_username, self.anitya_password)
+
+            reason = None
+            try:
+                anitya.add_new_project(name, homepage)
+            except hotness.anitya.AnityaException as e:
+                reason = str(e)
+
+            self.publish("project.map", msg=dict(
+                trigger=msg,
+                success=not bool(reason),
+                reason=reason))
+
+    def handle_monitor_toggle(self, msg):
+        status = msg['msg']['status']
+        name = msg['msg']['package']['name']
+        homepage = msg['msg']['package']['upstream_url']
+
+        self.log.info("Considering monitored %r with %r" % (name, homepage))
+
+        if not status:
+            self.log.info(".. but it was turned off.  Dropping.")
             return
 
-        # ... else
+        anitya = hotness.anitya.Anitya(self.anitya_url)
+        results = anitya.search(name, homepage)
+        total = results['total']
 
-        self.log.info("Saw 0 matching projects on anitya.  Attempting to add.")
-        anitya.login(self.anitya_username, self.anitya_password)
-        success = anitya.add_new_project(name, homepage)
-        self.publish("project.map", msg=dict(
-            trigger=msg, success=success))
+        if total > 1:
+            self.log.info("%i projects with %r %r already exist in anitya." % (
+                total, name, homepage))
+            return
+        elif total == 1:
+            # The project might exist in anitya, but it might not be mapped to
+            # a Fedora package yet, so map it if necessary.
+            project = results['projects'][0]
+
+            anitya.login(self.anitya_username, self.anitya_password)
+
+            reason = None
+            try:
+                anitya.map_new_package(name, project)
+            except hotness.anitya.AnityaException as e:
+                reason = str(e)
+
+            self.publish("project.map", msg=dict(
+                trigger=msg,
+                project=project,
+                success=not bool(reason),
+                reason=reason))
+
+            # After mapping, force a check for new tarballs
+            anitya.force_check(project)
+        else:
+            # OTHERWISE, there is *nothing* on anitya about it, so add one.
+            self.log.info("Saw 0 matching projects on anitya.  Adding.")
+            anitya.login(self.anitya_username, self.anitya_password)
+
+            reason = None
+            try:
+                anitya.add_new_project(name, homepage)
+            except hotness.anitya.AnityaException as e:
+                reason = str(e)
+
+            self.publish("project.map", msg=dict(
+                trigger=msg,
+                success=not bool(reason),
+                reason=reason))
 
     def is_monitored(self, package):
         """ Returns True if a package is marked as 'monitored' in pkgdb2. """

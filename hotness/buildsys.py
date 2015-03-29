@@ -63,7 +63,7 @@ class Koji(object):
         return task_id
 
     def run(self, cmd, cwd=None):
-        self.log.info("Running %r in %r" % (' '.join(cmd), cwd))
+        self.log.info("Running %r in %r", cmd, cwd)
         p = sp.Popen(cmd, cwd=cwd, stdout=sp.PIPE, stderr=sp.PIPE)
         out, err = p.communicate()
         if out:
@@ -71,8 +71,8 @@ class Koji(object):
         if err:
             self.log.warning(err)
         if p.returncode != 0:
-            self.log.error('code %s, cmd %r, err %r', p.returncode, cmd, err)
-            raise Exception
+            message = 'cmd:  %s\nreturn code:  %r\nstdout:\n%s\nstderr:\n%s'
+            raise Exception(message % (' '.join(cmd), p.returncode, out, err))
         return out
 
     def handle(self, package, upstream, version, rhbz):
@@ -92,11 +92,13 @@ class Koji(object):
 
             specfile = tmp + '/' + package + '.spec'
 
+            comment = 'Update to %s (#%d)' % (upstream, rhbz.bug_id)
+
             # This requires rpmdevtools-8.5 or greater
             cmd = [
                 '/usr/bin/rpmdev-bumpspec',
                 '--new', upstream,
-                '-c', 'Update to %s (#%d)' % (upstream, rhbz.bug_id),
+                '-c', comment,
                 '-u', self.userstring,
                 specfile,
             ]
@@ -104,11 +106,33 @@ class Koji(object):
 
             # First, get all patches and other sources from dist-git
             output = self.run(['fedpkg', 'sources'], cwd=tmp)
+            oldfile = output.strip().split()[-1]
+            self.log.debug("fedpkg grabbed %r", oldfile)
 
             # Then go and get the *new* tarball from upstream.
             # For these to work, it requires that rpmmacros be redefined to
             # find source files in the tmp directory.  See:  http://da.gd/1MWt
             output = self.run(['spectool', '-g', specfile], cwd=tmp)
+            newfile = output.strip().split()[-1]
+            self.log.debug("spectool grabbed %r", oldfile)
+
+            # Now, handle an edge case before we proceed with building.
+            # Sometimes, the specfiles have versions hardcoded in them such
+            # that bumping the Version field and running spectool actually
+            # pulls down another copy of the old tarball, not the new one.
+            # https://github.com/fedora-infra/the-new-hotness/issues/29
+            # So, check that the sha sums of the tarballs are different.
+            oldsum = self.run(['sha256sum', os.path.join(tmp, oldfile)])
+            newsum = self.run(['sha256sum', os.path.join(tmp, newfile)])
+            oldsum, newsum = oldsum.split()[0], newsum.split()[0]
+            if oldsum == newsum:
+                raise ValueError(
+                    "spectool was unable to grab new sources\n\n"
+                    "old source: {oldfile}\nold sha256: {oldsum}\n\n"
+                    "new source: {newfile}\nnew sha256: {newsum}\n".format(
+                        oldfile=oldfile, oldsum=oldsum,
+                        newfile=newfile, newsum=newsum))
+
             output = self.run(['rpmbuild', '-bs', specfile], cwd=tmp)
 
             srpm = os.path.join(tmp, output.strip().split()[-1])
@@ -116,7 +140,19 @@ class Koji(object):
 
             session = self.session_maker()
             task_id = self.scratch_build(session, package, srpm)
-            return task_id
+
+            # Now, craft a patch to attach to the ticket
+            output = self.run(['git', 'commit', '-a',
+                               '-m', comment,
+                               '--author', self.userstring], cwd=tmp)
+            filename = self.run(['git', 'format-patch', 'HEAD^'], cwd=tmp)
+            filename = filename.strip()
+
+            # Copy the patch out of this doomed dir so bz can find it
+            destination = os.path.join('/var/tmp', filename)
+            shutil.move(os.path.join(tmp, filename), destination)
+
+            return task_id, destination, '[patch] ' + comment
         finally:
             self.log.debug("Removing %r" % tmp)
             shutil.rmtree(tmp)
