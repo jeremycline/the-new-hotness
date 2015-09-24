@@ -59,6 +59,10 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
         # we can.
         'org.fedoraproject.prod.pkgdb.package.new',
 
+        # We also look for when packages get their upstream_url changed in
+        # Fedora and try to perform anitya modifications in response.
+        'org.fedoraproject.prod.pkgdb.package.update',
+
         # Lastly, look for packages that get their monitoring flag switched on
         # and off.  We'll use that as another opportunity to map stuff in
         # anitya.
@@ -132,7 +136,13 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
         elif topic.endswith('buildsys.build.state.change'):
             self.handle_buildsys_real(msg)
         elif topic.endswith('pkgdb.package.new'):
-            self.handle_new_package(msg)
+            listing = msg['msg']['package_listing']
+            if listing['collection']['branchname'] != 'master':
+                self.log.debug("Ignoring non-rawhide new package...")
+                return
+            self.handle_new_package(msg, listing['package'])
+        elif topic.endswith('pkgdb.package.update'):
+            self.handle_updated_package(msg)
         elif topic.endswith('pkgdb.package.monitor.update'):
             self.handle_monitor_toggle(msg)
         else:
@@ -238,38 +248,75 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
                 self.bugzilla.follow_up(note, bz)
 
     def handle_buildsys_scratch(self, msg):
-        # Is this a scratch build that we triggered a couple minutes ago?
-        task_id = msg['msg']['info']['id']
-        if task_id not in self.triggered_task_ids:
-            self.log.debug("Koji task_id=%r is not ours.  Drop it." % task_id)
+        instance = msg['msg']['instance']
+
+        if instance != 'primary':
+            self.log.debug("Ignoring secondary arch task...")
             return
 
-        self.log.info("Handling koji scratch msg %r" % msg.get('msg_id', None))
+        method = msg['msg']['method']
+
+        if method != 'build':
+            self.log.debug("Ignoring non-build task...")
+            return
+
+        task_id = msg['msg']['info']['id']
+
+        self.log.info("Handling koji scratch msg %r" % msg.get('msg_id'))
 
         # see koji.TASK_STATES for all values
         done_states = {
-            'CLOSED': 'succeeded',
+            'CLOSED': 'completed',
             'FAILED': 'failed',
             'CANCELLED': 'canceled',
         }
         state = msg['msg']['new']
-        self.log.info("Heard word that our task %r is %r." % (task_id, state))
         if state not in done_states:
             return
 
-        bug = self.triggered_task_ids.pop(task_id)
-        url = self.buildsys.url_for(task_id)
+        bugs = []
 
-        text = "Scratch build %s %s" % (done_states.get(state, state), url)
 
-        self.bugzilla.follow_up(text, bug)
-        self.publish("update.bug.followup", msg=dict(
-            trigger=msg, bug=dict(bug_id=bug.bug_id)))
+        url = fedmsg.meta.msg2link(msg, **self.hub.config)
+        subtitle = fedmsg.meta.msg2subtitle(msg, **self.hub.config)
+        text1 = "Scratch build %s %s" % (done_states.get(state, state), url)
+        text2 = "%s %s" % (subtitle, url)
+
+        # Followup on bugs we filed
+        if task_id in self.triggered_task_ids:
+            bugs.append((self.triggered_task_ids.pop(task_id), text1))
+
+        # Also follow up on Package Review requests, but only if the package is
+        # not already in Fedora (it would be a waste of time to query bugzilla
+        # if the review is already approved and scm has been processed).
+        package_name = '-'.join(msg['msg']['srpm'].split('-')[:-2])
+        if not self.in_pkgdb(package_name):
+            for bug in self.bugzilla.review_request_bugs(package_name):
+                bugs.append((bug, text2))
+
+        if not bugs:
+            self.log.debug("No bugs to update for %r" % msg.get('msg_id'))
+            return
+
+        self.log.info("Following up on %i bugs." % len(bugs))
+        for bug, text in bugs:
+            # Don't followup on bugs that we have just recently followed up on.
+            # https://github.com/fedora-infra/the-new-hotness/issues/17
+            latest = bug.comments[-1]    # Check just the latest comment
+            target = 'completed http'    # Our comments have this in it
+            me = self.bugzilla.username  # Our comments are, obviously, by us.
+            if latest['creator'] == me and target in latest['text']:
+                self.log.info("%s has a recent comment from me." % bug.weburl)
+                continue
+
+            self.bugzilla.follow_up(text, bug)
+            self.publish("update.bug.followup", msg=dict(
+                trigger=msg, bug=dict(bug_id=bug.bug_id)))
 
     def handle_buildsys_real(self, msg):
         idx = msg['msg']['build_id']
         state = msg['msg']['new']
-        release = msg['msg']['release']
+        release = msg['msg']['release'].split('.')[-1]
         instance = msg['msg']['instance']
 
         if instance != 'primary':
@@ -300,39 +347,61 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
             return
 
         self.log.info("Handling koji build msg %r" % msg.get('msg_id', None))
-        bug = self.bugzilla.exact_bug(name=package, upstream=version)
-        if not bug:
-            self.log.info("No bug found for %s-%s.%s, dropping message." % (
-                package, version, release))
-            return
 
-        # Don't followup on bugs that are already closed... otherwise we would
-        # followup for ALL ETERNITY.
-        if bug.status in self.bugzilla.bug_status_closed:
-            self.log.info("Bug %s is %s.  Dropping message." % (
-                bug.weburl, bug.status))
+        # Search for all FTBFS bugs and any upstream bugs we filed earlier.
+        bugs = list(self.bugzilla.ftbfs_bugs(name=package)) + [
+            self.bugzilla.exact_bug(name=package, upstream=version),
+        ]
+        # Filter out None values
+        bugs = [bug for bug in bugs if bug]
+
+        if not bugs:
+            self.log.info("No bugs found for %s-%s.%s." % (
+                package, version, release))
             return
 
         url = fedmsg.meta.msg2link(msg, **self.hub.config)
         subtitle = fedmsg.meta.msg2subtitle(msg, **self.hub.config)
         text = "%s %s" % (subtitle, url)
 
-        self.bugzilla.follow_up(text, bug)
-        self.publish("update.bug.followup", msg=dict(
-            trigger=msg, bug=dict(bug_id=bug.bug_id)))
+        for bug in bugs:
+            # Don't followup on bugs that we have just recently followed up on.
+            # https://github.com/fedora-infra/the-new-hotness/issues/17
+            latest = bug.comments[-1]    # Check just the latest comment
+            target = 'completed http'    # Our comments have this in it
+            me = self.bugzilla.username  # Our comments are, obviously, by us.
+            if latest['creator'] == me and target in latest['text']:
+                self.log.info("%s has a recent comment from me." % bug.weburl)
+                continue
 
-    def handle_new_package(self, msg):
-        listing = msg['msg']['package_listing']
-        if listing['collection']['branchname'] != 'master':
-            self.log.debug("Ignoring non-rawhide new package...")
+            # Don't followup on bugs that are already closed... otherwise we
+            # would followup for ALL ETERNITY.
+            if bug.status in self.bugzilla.bug_status_closed:
+                self.log.info("Bug %s is %s.  Dropping." % (
+                    bug.weburl, bug.status))
+                continue
+
+            self.bugzilla.follow_up(text, bug)
+            self.publish("update.bug.followup", msg=dict(
+                trigger=msg, bug=dict(bug_id=bug.bug_id)))
+
+    def handle_new_package(self, msg, package):
+        name = package['name']
+        homepage = package['upstream_url']
+
+        if not homepage:
+            # If there is not homepage set at the outset in pkgdb, there's
+            # nothing smart we can do with respect to anitya, so.. wait.
+            # pkgdb has a cron script that runs weekly that updates the
+            # upstream url there, so when that happens, we'll be triggered
+            # and can try again.
+            self.log.warn("New package %r has no homepage.  Dropping." % name)
             return
 
-        name = listing['package']['name']
-        homepage = listing['package']['upstream_url']
         self.log.info("Considering new package %r with %r" % (name, homepage))
 
         anitya = hotness.anitya.Anitya(self.anitya_url)
-        results = anitya.search(name, homepage)
+        results = anitya.search_by_homepage(name, homepage)
 
         projects = results['projects']
         total = results['total']
@@ -370,6 +439,44 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
                 trigger=msg,
                 success=not bool(reason),
                 reason=reason))
+
+    def handle_updated_package(self, msg):
+        self.log.info("Handling pkgdb update msg %r" % msg.get('msg_id'))
+
+        fields = msg['msg']['fields']
+        if not 'upstream_url' in fields:
+            self.log.info("Ignoring package edit with no url change.")
+            return
+
+        package = msg['msg']['package']
+        name = package['name']
+        homepage = package['upstream_url']
+
+        self.log.info("Trying url change on %s: %s" % (name, homepage))
+
+        # There are two possible scenarios here.
+        # 1) the package already *is mapped* in anitya, in which case we can
+        #    update the old url there
+        # 2) the package is not mapped there, in which case we handle this like
+        #    a new package (and try to create it and map it)
+
+        anitya = hotness.anitya.Anitya(self.anitya_url)
+        project = anitya.get_project_by_package(name)
+
+        if project:
+            self.log.info("Found project with name %s" % project['name'])
+            anitya.login(self.anitya_username, self.anitya_password)
+            if project['homepage'] == homepage:
+                self.log.info("No need to update anitya for %s.  Homepages"
+                                " are already in sync." % project['name'])
+                return
+
+            self.log.info("Updating anitya url on %s" % project['name'])
+            anitya.update_url(project, homepage)
+            anitya.force_check(project)
+        else:
+            # Just pretend like it's a new package, since its not in anitya.
+            self.handle_new_package(msg, package)
 
     def handle_monitor_toggle(self, msg):
         status = msg['msg']['status']
@@ -447,6 +554,21 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
             return False
 
     @hotness.cache.cache.cache_on_arguments()
+    def in_pkgdb(self, package):
+        """ Returns True if a package is in the Fedora pkgdb. """
+
+        url = '{0}/package/{1}'.format(self.pkgdb_url, package)
+        self.log.debug("Checking %r" % url)
+        r = requests.get(url)
+
+        if r.status_code == 404:
+            return False
+        if r.status_code != 200:
+            self.log.warning('URL %s returned code %s', r.url, r.status_code)
+            return False
+        return True
+
+    @hotness.cache.cache.cache_on_arguments()
     def get_dist_tag(self):
         url = '{0}/collections/master/'.format(self.pkgdb_url)
         self.log.debug("Getting dist tag from %r" % url)
@@ -457,6 +579,6 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
 
         data = r.json()
         collection = data['collections'][0]
-        tag = collection['dist_tag']
+        tag = collection['dist_tag'][1:]
         self.log.debug("Got rawhide suffix %r" % tag)
         return tag

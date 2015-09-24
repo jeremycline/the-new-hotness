@@ -31,9 +31,10 @@ class Bugzilla(object):
         'emailreporter1': '1',
         'emailtype1': 'exact',
     }
-
-    bug_status_open = ['NEW', 'ASSIGNED', 'MODIFIED', 'ON_DEV', 'ON_QA',
-                       'VERIFIED', 'FAILS_QA', 'RELEASE_PENDING', 'POST']
+    bug_status_early = ['NEW', 'ASSIGNED']
+    bug_status_open = bug_status_early + [
+        'MODIFIED', 'ON_DEV', 'ON_QA', 'VERIFIED', 'FAILS_QA',
+        'RELEASE_PENDING', 'POST']
     bug_status_closed = ['CLOSED']
 
     new_bug = {
@@ -48,12 +49,12 @@ class Bugzilla(object):
         self.log = logging.getLogger('fedmsg')
         default = 'https://partner-bugzilla.redhat.com'
         url = self.config.get('url', default)
-        username = self.config['user']
+        self.username = self.config['user']
         password = self.config['password']
         self.bugzilla = bugzilla.Bugzilla(
             url=url, cookiefile=None, tokenfile=None)
         self.log.info("Logging in to %s" % url)
-        self.bugzilla.login(username, password)
+        self.bugzilla.login(self.username, password)
 
         self.base_query['product'] = self.config['product']
         self.base_query['email1'] = self.config['user']
@@ -122,10 +123,48 @@ class Bugzilla(object):
 
     def attach_patch(self, filename, description, bug):
         self.log.debug("Attaching patch to bug %r" % bug.bug_id)
-        self.bugzilla.attachfile(bug.bug_id, filename, description)
+        self.bugzilla.attachfile(bug.bug_id, filename, description,
+                is_patch=True)
         self.log.info("Attached patch to bug: %s" % bug.weburl)
 
+    def ftbfs_bugs(self, name):
+        """ Return all FTBFS bugs we find for a package """
+        short_desc_pattern = '%s: FTBFS in rawhide' % name
+        query = {
+            'component': name,
+            'bug_status': self.bug_status_open,
+            'short_desc': short_desc_pattern,
+            'short_desc_type': 'substring',
+            'product': self.config['product'],
+            'query_format': 'advanced',
+        }
+        bugs = self.bugzilla.query(query)
+        bugs = bugs or []
+        for bug in bugs:
+            # The short_desc_pattern contains a space at the end, which is
+            # currently not recognized by bugzilla. Therefore this test is
+            # required:
+            if bug.short_desc.startswith(short_desc_pattern):
+                yield bug
+
+    def review_request_bugs(self, name):
+        """ Return the review request bugs for a package. """
+        short_desc_pattern = ' %s ' % name
+        query = {
+            'component': 'Package Review',
+            'bug_status': self.bug_status_open,
+            'short_desc': short_desc_pattern,
+            'short_desc_type': 'substring',
+            'product': self.config['product'],
+            'query_format': 'advanced',
+        }
+        bugs = self.bugzilla.query(query)
+        bugs = bugs or []
+        for bug in bugs:
+            yield bug
+
     def exact_bug(self, **package):
+        """ Return a particular upstream release ticket for a package. """
         short_desc_pattern = '%(name)s-%(upstream)s ' % package
         query = {
             'component': package['name'],
@@ -145,9 +184,15 @@ class Bugzilla(object):
                 return bug
 
     def inexact_bug(self, **package):
+        """ Return any upstream release ticket for a package. """
+        # We'll match bugs in the NEW or ASSIGNED state
+        # https://github.com/fedora-infra/the-new-hotness/issues/58
+        possible_statuses = list(set(
+            self.bug_status_early + [self.config['bug_status']]
+        ))
         query = {
             'component': [package['name']],
-            'bug_status': [self.config['bug_status']],
+            'bug_status': possible_statuses,
         }
 
         query.update(self.base_query)
