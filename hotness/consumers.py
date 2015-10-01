@@ -368,7 +368,7 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
             # Don't followup on bugs that we have just recently followed up on.
             # https://github.com/fedora-infra/the-new-hotness/issues/17
             latest = bug.comments[-1]    # Check just the latest comment
-            target = 'completed http'    # Our comments have this in it
+            target = subtitle            # Our comments have this in it
             me = self.bugzilla.username  # Our comments are, obviously, by us.
             if latest['creator'] == me and target in latest['text']:
                 self.log.info("%s has a recent comment from me." % bug.weburl)
@@ -548,6 +548,13 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
         try:
             data = r.json()
             package = data['packages'][0]
+
+            # Even if the package says it is monitored.. if it is retired, then
+            # let's not file any bugs or anything for it.
+            if package['package']['status'] == "Retired":
+                return False
+
+            # Otherwise, if it is not retired, then return the monitor flag.
             return package['package'].get('monitor', True)
         except:
             self.log.exception("Problem interacting with pkgdb.")
