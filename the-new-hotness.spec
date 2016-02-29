@@ -9,7 +9,7 @@
 %global modname the-new-hotness
 
 Name:               the-new-hotness
-Version:            0.6.3
+Version:            0.7.0
 Release:            1%{?dist}
 Summary:            Consume anitya fedmsg messages to file bugzilla bugs
 
@@ -26,11 +26,14 @@ BuildRequires:      python-bugzilla
 BuildRequires:      python-dogpile-cache
 BuildRequires:      fedmsg
 BuildRequires:      python-fedmsg-meta-fedora-infrastructure
+BuildRequires:      python-six
 
 Requires:           python-bugzilla
 Requires:           python-dogpile-cache
 Requires:           fedmsg
 Requires:           python-fedmsg-meta-fedora-infrastructure
+Requires:           python-six
+Requires:           rebase-helper
 
 %description
 Fedmsg consumer that listens to release-monitoring.org and files bugzilla bugs
@@ -58,6 +61,12 @@ rm -rf %{buildroot}%{python2_sitelib}/tests/
 %{python2_sitelib}/the_new_hotness-%{version}*
 
 %changelog
+* Mon Feb 29 2016 Ralph Bean <rbean@redhat.com> - 0.7.0-1
+- new version
+
+* Tue Nov 24 2015 Ralph Bean <rbean@redhat.com> - 0.6.4-1
+- new version
+
 * Fri Oct 09 2015 Ralph Bean <rbean@redhat.com> - 0.6.3-1
 - new version
 
