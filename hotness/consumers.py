@@ -219,10 +219,6 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
 
         # Is it something that we're being asked not to act on?
         is_monitored = self.is_monitored(package)
-        if not is_monitored:
-            self.log.info("Pkgdb says not to monitor %r.  Dropping." % package)
-            self.publish("update.drop", msg=dict(trigger=msg, reason="pkgdb"))
-            return
 
         # Is it new to us?
         fname = self.yumconfig
@@ -236,8 +232,9 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
             # nothing reasonable we can do.  Notify the world of our failure
             # and go back to the event loop.
             self.log.warn("No rawhide version found for %r" % package)
-            self.publish("update.drop", msg=dict(
-                trigger=msg, reason="rawhide"))
+            if is_monitored:
+                self.publish("update.drop", msg=dict(
+                    trigger=msg, reason="rawhide"))
             return
 
         self.log.info("Comparing upstream %s against repo %s-%s" % (
@@ -248,6 +245,11 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
         if diff == 1:
             self.log.info("OK, %s is newer than %s-%s" % (
                 upstream, version, release))
+
+            if not is_monitored:
+                self.log.info("Pkgdb says not to monitor %r.  Dropping." % package)
+                self.publish("update.drop", msg=dict(trigger=msg, reason="pkgdb"))
+                return
 
             bz = self.bugzilla.handle(
                 projectid, package, upstream, version, release, url)
@@ -284,11 +286,10 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
                                 else:
                                     self.new_triggered_task_ids[task_id] = [bz, None, str(upstream), str(package)]
                 else:
-                    note = 'Patching or scratch build for %s and version %s FAILED.\n' \
-                           'See for details' % (package, version)
+                    note = 'Patching or scratch build for %s-%s failed.\n' % (package, version)
                     self.bugzilla.follow_up(note, bz)
                     if 'logs' in rh_stuff['build_logs']:
-                        for log in six.iteritems(rh_stuff['build_logs']['logs']):
+                        for log in rh_stuff['build_logs']['logs']:
                             note = 'Build log %s.' % log
                             self.bugzilla.attach_patch(log, note, bz)
                     # Attach rebase-helper logs for another analysis
@@ -296,7 +297,7 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
                         for log in rh_stuff['logs']:
                             rebase_helper_url = 'https://github.com/phracek/rebase-helper/issues'
                             note_logs = 'Rebase-helper %s log file.\n' \
-                                        ' See for details and report the eventual error to rebase-helper %s.' % \
+                                        'See for details and report the eventual error to rebase-helper %s.' % \
                                         (os.path.basename(log), rebase_helper_url)
                             self.bugzilla.attach_patch(log, note_logs, bz)
 
@@ -304,7 +305,8 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
                     for patch in rh_stuff['patches']:
                         self.bugzilla.follow_up(patch, bz)
                 os.chdir(cwd)
-                shutil.rmtree(tmp)
+                if os.path.exists(tmp):
+                    shutil.rmtree(tmp)
 
             except Exception as ex:
                 self.log.info('Customer.py: Rebase helper failed with an unknown reason. %s' % str(ex))
@@ -318,8 +320,12 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
                     for log in rh_stuff['logs']:
                         rh_logs = "Log %s provided by rebase-helper." % log
                         self.bugzilla.attach_patch(log, rh_logs, bz)
+
                 os.chdir(cwd)
-                shutil.rmtree(tmp)
+
+                if os.path.exists(tmp):
+                    shutil.rmtree(tmp)
+
                 self.log.info("Now with #%i, time to do koji stuff" % bz.bug_id)
                 try:
                     # Kick off a scratch build..
@@ -327,7 +333,7 @@ class BugzillaTicketFiler(fedmsg.consumers.FedmsgConsumer):
                         package, upstream, version, bz)
 
                     # Map that koji task_id to the bz ticket we want to pursue.
-                    self.new_triggered_task_ids[task_id] = [bz, None]
+                    self.new_triggered_task_ids[task_id] = [bz, None, str(upstream), str(package)]
                     # Attach the patch to the ticket
                     self.bugzilla.attach_patch(patch_filename, description, bz)
                 except Exception as e:
