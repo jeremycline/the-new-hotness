@@ -9,7 +9,6 @@ import string
 import subprocess as sp
 import tempfile
 import time
-import six
 
 import koji
 import sh
@@ -104,7 +103,7 @@ class Koji(object):
                 '/usr/bin/rpmdev-bumpspec',
                 '--new', upstream,
                 '-c', comment,
-                '-u', self.userstring,
+                '-u', ' '.join(self.userstring),
                 specfile,
             ]
             output = self.run(cmd)
@@ -139,18 +138,18 @@ class Koji(object):
                         oldfile=oldfile, oldsum=oldsum,
                         newfile=newfile, newsum=newsum))
 
-            output = self.run(['rpmbuild', '-bs', specfile], cwd=tmp)
+            output = self.run(['rpmbuild', '-D', '_sourcedir .', '-D', '_topdir .', '-bs', specfile], cwd=tmp)
 
             srpm = os.path.join(tmp, output.strip().split()[-1])
-            self.log.debug("Got srpm %r" % srpm)
+            self.log.info("Got srpm %r" % srpm)
 
             session = self.session_maker()
             task_id = self.scratch_build(session, package, srpm)
 
             # Now, craft a patch to attach to the ticket
-            output = self.run(['git', 'commit', '-a',
-                               '-m', comment,
-                               '--author', self.userstring], cwd=tmp)
+            self.run(['git', 'user.name', self.userstring[0]], cwd=tmp)
+            self.run(['git', 'user.email', self.userstring[1][1:-1]], cwd=tmp)
+            output = self.run(['git', 'commit', '-a', '-m', comment], cwd=tmp)
             filename = self.run(['git', 'format-patch', 'HEAD^'], cwd=tmp)
             filename = filename.strip()
 

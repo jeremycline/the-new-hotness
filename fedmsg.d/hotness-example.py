@@ -32,8 +32,8 @@ config = {
     'hotness.bugzilla.enabled': True,
 
     'hotness.bugzilla': {
-        #'user': None,
-        #'password': None,
+        # 'user': None,
+        # 'password': None,
         'url': 'https://partner-bugzilla.redhat.com',
         'product': 'Fedora',
         'version': 'rawhide',
@@ -50,8 +50,8 @@ config = {
         'cert': os.path.expanduser('~/.fedora.cert'),
         'ca_cert': os.path.expanduser('~/.fedora-server-ca.cert'),
         'git_url': 'http://pkgs.fedoraproject.org/cgit/rpms/{package}.git',
-        'userstring': ('Upstream Monitor',
-                       '<upstream-release-monitoring@fedoraproject.org>'),
+        # Expected format is (<full name>, <<email>>)
+        'userstring': ('Upstream Monitor', '<upstream-release-monitoring@fedoraproject.org>'),
         'opts': {'scratch': True},
         'priority': 30,
         'target_tag': 'rawhide',
@@ -65,8 +65,8 @@ config = {
 
     'hotness.anitya': {
         'url': 'https://release-monitoring.org',
-        #'username': '....',
-        #'password': '....',
+        # 'username': '....',
+        # 'password': '....',
     },
 
     'hotness.pkgdb_url': 'https://admin.fedoraproject.org/pkgdb/api',
