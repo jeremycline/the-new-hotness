@@ -1,0 +1,172 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    
+    <title>Contributing &#8212; The New Hotness 0.7.3 documentation</title>
+    
+    <link rel="stylesheet" href="_static/alabaster.css" type="text/css" />
+    <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+    
+    <script type="text/javascript">
+      var DOCUMENTATION_OPTIONS = {
+        URL_ROOT:    './',
+        VERSION:     '0.7.3',
+        COLLAPSE_INDEX: false,
+        FILE_SUFFIX: '.html',
+        HAS_SOURCE:  true
+      };
+    </script>
+    <script type="text/javascript" src="_static/jquery.js"></script>
+    <script type="text/javascript" src="_static/underscore.js"></script>
+    <script type="text/javascript" src="_static/doctools.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="top" title="The New Hotness 0.7.3 documentation" href="index.html" />
+    <link rel="prev" title="Welcome to The New Hotness documentation!" href="index.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head>
+  <body role="document">
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <div class="section" id="contributing">
+<h1>Contributing<a class="headerlink" href="#contributing" title="Permalink to this headline">¶</a></h1>
+<p>The New Hotness welcomes contributions! This document should help you get started.</p>
+<div class="section" id="contribution-guidelines">
+<h2>Contribution Guidelines<a class="headerlink" href="#contribution-guidelines" title="Permalink to this headline">¶</a></h2>
+<p>When you make a pull request, a Fedora Infrastructure team member will review your
+code. Please make sure you follow the guidelines below:</p>
+<div class="section" id="code-style">
+<h3>Code style<a class="headerlink" href="#code-style" title="Permalink to this headline">¶</a></h3>
+<p>We follow the <a class="reference external" href="https://www.python.org/dev/peps/pep-0008/">PEP8</a> style guide for Python.
+The test suite includes a test that enforces the required style, so all you need to do is
+run the tests to ensure your code follows the style. If the unit test passes, you are
+good to go!</p>
+</div>
+<div class="section" id="unit-tests">
+<h3>Unit tests<a class="headerlink" href="#unit-tests" title="Permalink to this headline">¶</a></h3>
+<p>All unit tests must pass. All new code should have 100% test coverage.
+Any bugfix should be accompanied by one or more unit tests to demonstrate the fix.
+If you are unsure how to write unit tests for your code,
+we will be happy to help you during the code review process.</p>
+</div>
+</div>
+<div class="section" id="development-environment">
+<h2>Development environment<a class="headerlink" href="#development-environment" title="Permalink to this headline">¶</a></h2>
+<p>The best way to set up a development enviroment is to use <a class="reference external" href="https://vagrantup.com/">Vagrant</a>.
+To get started, install Vagrant:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span>$ sudo dnf install vagrant libvirt vagrant-libvirt vagrant-sshfs ansible
+</pre></div>
+</div>
+<p>Next, clone the repository and configure your Vagrantfile:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span>$ git clone https://github.com/fedora-infra/the-new-hotness.git
+$ cd the-new-hotness
+$ cp Vagrantfile.example Vagrantfile
+$ vagrant up
+$ vagrant ssh
+</pre></div>
+</div>
+<p>Before you can run <code class="docutils literal"><span class="pre">the-new-hotness</span></code>, you need to add your bugzilla credentials
+to the configuration. You can set these credentials in <code class="docutils literal"><span class="pre">~/.fedmsg.d/hotness.py</span></code>
+in the virtual machine.</p>
+<p>You now have a functional development environment. The message of the day for the virtual machine
+has some helpful tips, but the basic services can be started in the virtual machine with:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span>$ systemctl --user start hub.service relay.service
+</pre></div>
+</div>
+<p>Log output is viewable with <code class="docutils literal"><span class="pre">journalctl</span></code>.</p>
+<div class="section" id="simulating-updates">
+<h3>Simulating updates<a class="headerlink" href="#simulating-updates" title="Permalink to this headline">¶</a></h3>
+<p>You can now replay actual messages the production deployment of Anitya has sent
+with <code class="docutils literal"><span class="pre">fedmsg-dg-replay</span></code>:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span>$ fedmsg-dg-replay --msg-id &lt;msg-id&gt;
+</pre></div>
+</div>
+<p>There&#8217;s a helpful script to retrieve message IDs. From the root of the repository:</p>
+<div class="highlight-default"><div class="highlight"><pre><span></span>$ python devel/anitya_messages.py
+</pre></div>
+</div>
+</div>
+</div>
+</div>
+
+
+          </div>
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+  <h3><a href="index.html">Table Of Contents</a></h3>
+  <ul>
+<li><a class="reference internal" href="#">Contributing</a><ul>
+<li><a class="reference internal" href="#contribution-guidelines">Contribution Guidelines</a><ul>
+<li><a class="reference internal" href="#code-style">Code style</a></li>
+<li><a class="reference internal" href="#unit-tests">Unit tests</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#development-environment">Development environment</a><ul>
+<li><a class="reference internal" href="#simulating-updates">Simulating updates</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+      <li>Previous: <a href="index.html" title="previous chapter">Welcome to The New Hotness documentation!</a></li>
+  </ul></li>
+</ul>
+</div>
+  <div role="note" aria-label="source link">
+    <h3>This Page</h3>
+    <ul class="this-page-menu">
+      <li><a href="_sources/dev-guide.txt"
+            rel="nofollow">Show Source</a></li>
+    </ul>
+   </div>
+<div id="searchbox" style="display: none" role="search">
+  <h3>Quick search</h3>
+    <form class="search" action="search.html" method="get">
+      <div><input type="text" name="q" /></div>
+      <div><input type="submit" value="Go" /></div>
+      <input type="hidden" name="check_keywords" value="yes" />
+      <input type="hidden" name="area" value="default" />
+    </form>
+</div>
+<script type="text/javascript">$('#searchbox').show(0);</script>
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2016, Red Hat, Inc. and others.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 1.4.8</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.9</a>
+      
+      |
+      <a href="_sources/dev-guide.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>
